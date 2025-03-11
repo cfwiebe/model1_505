@@ -1,0 +1,169 @@
+```{r}
+library(tidyverse)
+library(caret)
+library(dplyr)
+
+wine <- readRDS(gzcon(url("https://github.com/cd-public/D505/raw/master/dat/model.rds")))
+str(wine)
+```
+
+```{r}
+# Most common words overall
+wine_words <- wine %>%
+  unnest_tokens(word, description)
+
+wine_words <- wine_words %>%
+  anti_join(stop_words, by = "word")
+
+word_counts <- wine_words %>%
+  count(word, sort = TRUE)
+
+head(word_counts)
+
+# Single word TF-IDFs
+wine_tokens <- wine %>%
+  unnest_tokens(word, description) %>%
+  anti_join(stop_words, by = "word") %>%
+  filter(!grepl("[^a-zA-Z]", word))
+
+wine_tfidf <- wine_tokens %>%
+  count(province, word) %>%
+  bind_tf_idf(word, province, n)
+
+top_words <- wine_tfidf %>%
+  group_by(province) %>%
+  slice_max(tf_idf, n = 5) %>%
+  ungroup()
+
+print(top_words)
+
+# Bigram TF-IDFs
+wine_bigrams <- wine %>%
+  unnest_tokens(bigram, description, token = "ngrams", n = 2) %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word, !word2 %in% stop_words$word) %>%
+  unite(bigram, word1, word2, sep = "_")
+
+```
+
+
+```{r}
+wine2 <- wine %>%
+  mutate(sagebrush = ifelse(str_detect(description, regex("sagebrush", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(beaune = ifelse(str_detect(description, regex("beaune", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(nuits = ifelse(str_detect(description, regex("nuits", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(crus = ifelse(str_detect(description, regex("crus", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(georges = ifelse(str_detect(description, regex("georges", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(slate = ifelse(str_detect(description, regex("slate", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(chaparral = ifelse(str_detect(description, regex("chaparral", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(peppercorn = ifelse(str_detect(description, regex("peppercorn", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(stiff = ifelse(str_detect(description, regex("stiff", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(details = ifelse(str_detect(description, regex("details", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(lick = ifelse(str_detect(description, regex("lick", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(dundee = ifelse(str_detect(description, regex("dundee", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(feels = ifelse(str_detect(description, regex("feels", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(resiny = ifelse(str_detect(description, regex("resiny", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(oaky = ifelse(str_detect(description, regex("oaky", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(brisk = ifelse(str_detect(description, regex("brisk", ignore_case = TRUE)), 1, 0)) %>%
+  mutate(ruddy = ifelse(str_detect(description, regex("ruddy", ignore_case = TRUE)), 1, 0))
+
+wine2 <- wine2 %>%
+  select(-description, -year)
+
+response <- "province"
+predictors <- names(wine2)[names(wine2) != response]
+
+best_kappa <- -Inf
+best_vars <- c()
+results <- data.frame(variables = character(), kappa = numeric())
+
+for (i in 1:length(predictors)) {
+  for (var in predictors) {
+    if (!var %in% best_vars) {
+      current_vars <- c(best_vars, var)
+      formula <- as.formula(paste(response, "~", paste(current_vars, collapse = "+")))
+      
+      fit <- train(formula,
+                   data = train,
+                   method = "naive_bayes",
+                   tuneLength = 15,
+                   metric = "Kappa",
+                   trControl = trainControl(method = "cv", number = 5))
+      
+      pred <- predict(fit, test)
+      kappa <- confusionMatrix(pred, factor(test[[response]]))$overall['Kappa']
+      
+      results <- rbind(results, data.frame(variables = paste(current_vars, collapse = "+"), kappa = kappa))
+      
+      if (kappa > best_kappa) {
+        best_kappa <- kappa
+        best_vars <- current_vars
+      }
+    }
+  }
+  
+  predictors <- predictors[!predictors %in% best_vars]
+}
+
+print(paste("Best variables:", paste(best_vars, collapse = "+")))
+print(paste("Best Kappa:", best_kappa))
+
+print(results)
+```
+
+```{r}
+set.seed(123)
+wino <- wine %>% 
+  mutate(chocolate = str_detect(description,"chocolate")) %>%
+  mutate(apple = str_detect(description,"apple")) %>%
+  mutate(earth = str_detect(description,"earth")) %>%
+  mutate(cranberry_acidity = str_detect(description,"cranberry_acidity")) %>% 
+  mutate(slate = str_detect(description,"slate")) %>% 
+  mutate(resiny = str_detect(description,"resiny")) %>% 
+  mutate(mocha = str_detect(description,"mocha")) %>% 
+  mutate(brisk = str_detect(description,"brisk")) %>%
+  mutate(stiff = str_detect(description,"stiff")) %>%
+  mutate(pomegranate = str_detect(description,"pomegranate")) %>% 
+  mutate(fruit = str_detect(description,"fruit")) %>% 
+  mutate(cherry = str_detect(description,"cherry")) %>% 
+  mutate(raspberry = str_detect(description,"raspberry")) %>% 
+  mutate(wine_dummy = str_detect(description,"wine")) %>% 
+  mutate(black = str_detect(description,"black")) %>% 
+  mutate(red = str_detect(description,"red")) %>% 
+  mutate(tannins = str_detect(description,"tannins")) %>% 
+  mutate(palate = str_detect(description,"palate")) %>% 
+  mutate(finish = str_detect(description,"finish")) %>% 
+  mutate(light = str_detect(description,"light")) %>% 
+  mutate(nose = str_detect(description,"nose")) %>% 
+  mutate(ripe = str_detect(description,"ripe")) %>% 
+  mutate(aroma = str_detect(description,"aroma")) %>% 
+  mutate(vineyard = str_detect(description,"vineyard")) %>% 
+  mutate(cranberry = str_detect(description,"cranberry")) %>% 
+  mutate(strawberry = str_detect(description,"strawberry")) %>% 
+  select(-description)
+
+preproc <- preProcess(wino, method = c("center", "scale"))
+wino <- predict(preproc, wino)
+
+split <- createDataPartition(wino$province, p = 0.8, list = FALSE)
+train <- wino[split, ]
+test <- wino[-split, ]
+
+fit <- train(province ~ .,
+             data = train, 
+             method = "knn",
+             tuneLength = 15,
+             metric = "Kappa",
+             trControl = trainControl(method = "cv", number = 5))
+confusionMatrix(predict(fit, test),factor(test$province))$overall['Kappa']
+confusionMatrix(predict(fit, test),factor(test$province))
+
+
+
+
+```
+
+```{r}
+write_rds(wino, file="charlie_wiebe_knn.rds")
+```
+
