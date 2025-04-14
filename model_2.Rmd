@@ -1,0 +1,122 @@
+```{r}
+library(tidyverse)
+library(caret)
+library(dplyr)
+library(tibble)
+library(combinat)
+bank <- readRDS(gzcon(url("https://cd-public.github.io/D505/dat/BankChurners.rds")))
+str(bank)
+```
+
+```{r}
+bank <- bank %>%
+  mutate(
+    Income_midpoint = case_when(
+      Income_Category == "Less than $40K" ~ 20000,
+      Income_Category == "$40K - $60K" ~ 50000,
+      Income_Category == "$60K - $80K" ~ 70000,
+      Income_Category == "$80K - $120K" ~ 100000,
+      Income_Category == "$120K +" ~ 140000,
+      TRUE ~ NA_real_
+    )
+  )
+
+bank_engineered <- bank %>%
+  mutate(
+    Inactivity_Ratio = Months_Inactive_12_mon / 12,
+    Contacts_per_Month = Contacts_Count_12_mon / 12,
+    Utilization_Bucket = cut(Avg_Utilization_Ratio,
+                            breaks = c(-Inf, 0.2, 0.6, Inf),
+                            labels = c("Low", "Medium", "High")),
+    Credit_to_Income = Credit_Limit / Income_midpoint,
+    Transaction_Decline = Total_Trans_Amt / (Total_Trans_Amt + Avg_Open_To_Buy),
+    Relationship_Depth = Total_Relationship_Count / Customer_Age,
+    Activity_Change = Total_Ct_Chng_Q4_Q1 * Total_Amt_Chng_Q4_Q1,
+    Dependent_Pressure = Dependent_count / Income_midpoint,
+    Tenure_Group = cut(Months_on_book,
+                       breaks = c(0, 12, 36, Inf),
+                       labels = c("New", "Established", "Long-term")),
+    Engagement_Score = (Total_Trans_Ct / 100) + 
+                       ifelse(Credit_Limit > 0, Total_Revolving_Bal / Credit_Limit, 0),
+    Churn = as.factor(Churn)
+  ) %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.infinite(.), NA, .)))
+
+glimpse(bank_engineered)
+
+colSums(is.na(bank_engineered))
+
+bank_clean <- bank_engineered %>% 
+  filter(complete.cases(.))
+
+colSums(is.na(bank_clean))
+```
+
+```{r}
+train(Churn ~ .,
+      data = bank_clean, 
+      trControl = trainControl(method = "cv", number = 5),
+      method = "glm",
+      family = "binomial",
+      maxit = 5)$results['Kappa']
+```
+
+```{r}
+engineered_features <- c(
+  "Inactivity_Ratio",
+  "Contacts_per_Month",
+  "Utilization_Bucket",
+  "Credit_to_Income",
+  "Transaction_Decline",
+  "Relationship_Depth",
+  "Activity_Change",
+  "Dependent_Pressure",
+  "Tenure_Group",
+  "Engagement_Score"
+)
+
+feature_combinations <- combn(engineered_features, 5, simplify = FALSE)
+
+test_feature_combination <- function(features) {
+  formula <- as.formula(paste("Churn ~", paste(features, collapse = " + ")))
+  
+  model <- train(
+    formula,
+    data = bank_clean, 
+    trControl = trainControl(method = "cv", number = 5, classProbs = TRUE),
+    method = "glm",
+    family = "binomial",
+    maxit = 100)
+  
+  return(model$results$Kappa)
+}
+
+results <- sapply(feature_combinations, test_feature_combination)
+
+best_idx <- which.max(results)
+best_features <- feature_combinations[[best_idx]]
+best_kappa <- results[best_idx]
+
+cat("Best 5-feature combination:\n")
+print(best_features)
+cat("\nKappa value:", best_kappa)
+
+bank_filtered <- bank_clean %>%
+  select(
+    Churn,
+    Contacts_per_Month,
+    Transaction_Decline,
+    Relationship_Depth,
+    Activity_Change,
+    Engagement_Score )
+
+train(Churn ~ .,
+      data = bank_filtered, 
+      trControl = trainControl(method = "cv", number = 5),
+      method = "glm",
+      family = "binomial",
+      maxit = 5)$results['Kappa']
+
+str(bank_filtered)
+write_rds(bank_filtered, file="model_2.rds")
+```
