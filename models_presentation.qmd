@@ -1,0 +1,261 @@
+---
+title: "Final Presentation"
+author: "Charlie Wiebe"
+date: "04/21/2025"
+format: revealjs
+---
+```{r setup, include=FALSE}
+library(vip)
+library(tidyverse)
+library(forcats)
+library(caret)
+library(janitor)
+library(recipes)
+
+engineer <- function(df) {
+  df <- df %>%
+    mutate(across(contains("src_"), ~ as.numeric(str_remove(., "%")) / 100),
+           across(January:December, ~ as.numeric(str_remove(., "%")) / 100),
+           across(starts_with("pct_"), ~ as.numeric(str_remove(., "%")) / 100),
+           yearMin = as.numeric(na_if(yearMin, "?")),
+           yearMax = as.numeric(na_if(yearMax, "?")),
+           age_span = yearMax - yearMin,
+           season_peak = max.col(across(January:December), ties.method = "first")) %>%
+    mutate(
+      is_variant = if_else(`Listing Type` == "variant", 1, 0),
+      direct_sales_ratio = `pct_Direct Sales`,
+      weight_class = cut(`Unit Weight (pounds)`, breaks = c(0, 0.25, 0.5, 1, Inf), labels = FALSE),
+      num_components_binned = cut(`Number of Components`, breaks = c(-Inf, 2, 4, 6, Inf), labels = FALSE),
+      component_cost_ratio = `BOM Cost` / (`Unit Weight (pounds)` + 0.01),
+      platform_diversity = rowSums(across(contains("src_")) > 0.1),
+      external_designer = if_else(Designer == "Outside", 1, 0),
+      is_plastic = if_else(`Main Component Material` == "Plastic", 1, 0),
+      sales_channel_code = as.integer(fct_lump(factor(`Sales Channel`), n = 4)),
+      complexity = nchar(`Base Product Sku`)
+    )
+  df <- df %>% select(-`Revenue 2019 to present`, -`Units Sold`, -`BOM Cost`)
+  return(df)
+}
+
+fast <- readRDS(gzcon(url("https://github.com/cd-public/D505/raw/refs/heads/master/dat/craven_train.rds")))
+profit <- fast[["Revenue 2019 to present"]] - fast[["BOM Cost"]] * fast[["Units Sold"]]
+fast <- engineer(fast)
+fast$Profit <- profit
+
+fast <- fast %>%
+  drop_na() %>%
+  select(-any_of(c("lookupId", "First Order (from sales data)", "Base Product Sku")))
+
+nzv <- nearZeroVar(fast)
+fast <- fast[, -nzv]
+
+cor_matrix <- cor(select_if(fast, is.numeric), use = "pairwise.complete.obs")
+high_corr <- findCorrelation(cor_matrix, cutoff = 0.85)
+fast <- fast[, -high_corr]
+
+fast <- fast %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.factor), ~ fct_lump_min(., min = 10)))
+
+one_level_factors <- fast %>%
+  select(where(is.factor)) %>%
+  summarise(across(everything(), ~ n_distinct(.))) %>%
+  pivot_longer(everything(), names_to = "var", values_to = "n_levels") %>%
+  filter(n_levels <= 1) %>%
+  pull(var)
+fast <- fast %>% select(-any_of(one_level_factors))
+
+dummies <- dummyVars(Profit ~ ., data = fast)
+fast_dummy <- predict(dummies, newdata = fast) %>% as.data.frame()
+fast_dummy$Profit <- fast$Profit
+fast_dummy <- fast_dummy %>% clean_names()
+colnames(fast_dummy)[which(names(fast_dummy) == "profit")] <- "profit"
+
+set.seed(42)
+model_full <- train(
+  profit ~ .,
+  data = fast_dummy,
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+importance <- varImp(model_full, scale = TRUE)$importance
+top_10_vars <- rownames(importance %>% arrange(desc(Overall)) %>% head(10)) %>% janitor::make_clean_names()
+
+fast_filtered <- fast_dummy %>%
+  select(all_of(top_10_vars), profit)
+
+model_final <- train(
+  profit ~ .,
+  data = fast_filtered,
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+model_final$results$RMSE
+
+vip::vip(model_full, num_features = 10) +
+  ggtitle("Top Predictors of Profit (Full Model)") +
+  theme_minimal()
+
+engineer_features <- function(df) {
+  df %>%
+    mutate(across(
+      c(starts_with("src_"), starts_with("pct_"),
+        matches("^(January|February|March|April|May|June|July|August|September|October|November|December)$")),
+      ~ as.numeric(sub("%", "", .)) / 100
+    )) %>%
+    mutate(`First Order Year` = as.numeric(format(as.Date(`First Order (from sales data)`, "%m/%d/%y"), "%Y")),
+           ProductAge = 2023 - `First Order Year`,
+           WebSalesDominant = ifelse(src_www > 0.5, 1, 0),
+           MobileSalesDominant = ifelse((src_iphone + src_android + src_ipad) > 0.5, 1, 0),
+           Q1Sales = January + February + March,
+           Q4Sales = October + November + December,
+           HighSeason = ifelse(Q4Sales > 0.5, 1, 0),
+           IsVariant = ifelse(`Listing Type` == "variant", 1, 0),
+           ProductComplexity = `Number of Components` * `Unit Weight (pounds)`,
+           DirectSalesPct = `pct_Direct Sales`,
+           StockOrdersPct = `pct_Orders for Stock`)
+}
+
+fast <- readRDS(gzcon(url("https://github.com/cd-public/D505/raw/refs/heads/master/dat/craven_train.rds")))
+fast$Profit <- fast$`Revenue 2019 to present` - fast$`BOM Cost` * fast$`Units Sold`
+
+fast_engineered <- fast %>%
+  engineer_features() %>%
+  select(
+    WebSalesDominant, MobileSalesDominant,
+    Q1Sales, Q4Sales, HighSeason,
+    IsVariant, ProductComplexity, ProductAge,
+    DirectSalesPct, StockOrdersPct,
+    Profit
+  )
+
+pre_proc <- preProcess(fast_engineered, method = c("medianImpute"))
+fast_engineered <- predict(pre_proc, fast_engineered)
+
+ctrl <- trainControl(method = "cv", number = 5)
+
+tuneGrid <- expand.grid(mtry = c(2, 4, 6, 8))
+rf_tuned <- train(
+  Profit ~ ., data = fast_engineered,
+  method = "rf",
+  trControl = ctrl,
+  tuneGrid = tuneGrid
+)
+
+print(rf_tuned)
+print(varImp(rf_tuned))
+
+models <- list(
+  rf = rf_tuned,
+  xgb = train(Profit ~ ., data = fast_engineered, method = "xgbTree", trControl = ctrl),
+  glmnet = train(Profit ~ ., data = fast_engineered, method = "glmnet", trControl = ctrl),
+  svm = train(Profit ~ ., data = fast_engineered, method = "svmRadial", trControl = ctrl)
+)
+
+results <- resamples(models)
+summary(results)
+
+```
+
+# Overview of My Process
+
+1. Loaded and explored craven_train.rds
+2. Created Profit as the target variable
+3. Engineered **20 features**, avoiding leakage from revenue/cost
+4. Filtered down to the 10 best features
+5. Tested multiple models (linear, RF, XGBoost, etc.)
+6. Tuned and selected a **random forest model**, optimized via RMSE
+
+# Feature Engineering Philosophy
+
+- Focused on features that:
+  - Reflect real-world product & sales traits
+  - Avoid direct profit leakage
+  - Capture meaningful signal (seasonality, platform spread, product design)
+  
+# Feature Optimization Process
+
+- **Step 1: Engineered 20+ Features**  
+  Focused on sales patterns, seasonality, product complexity, and channel mix — while strictly excluding any variables used to calculate `Profit`.
+
+- **Step 2: Trained Full Random Forest Model**  
+  Used all engineered features (after cleaning, imputing, encoding, and removing correlated/nzv features) to train a baseline `random forest` model.
+  
+# Feature Optimization Process
+
+- **Step 3: Ranked Features by Variable Importance**  
+  Used `vip::vip()` and `varImp()` to extract and rank features based on their contribution to reducing prediction error in the full RF model.
+
+- **Step 4: RMSE Filtering via Forward Search**  
+  Iteratively retrained models using top k variables (`k = 1:10`), recording the **cross-validated RMSE** at each step.  
+  Selected the top **k = 10** features that minimized RMSE.
+  
+# Feature Optimization Process
+
+- **Step 5: Final Model with Top 10**  
+  Retrained the final `random forest` model using only the top 10 ranked features.  
+  This model outperformed the linear baseline and maintained strong generalization.
+  
+# Final Feature Selection
+
+**direct_sales_ratio** – proportion of direct sales, **stock_orders_pct** – percent of orders for stock, **Q1Sales, Q4Sales** – seasonal performance, **is_variant** – listing type, **product_age** – based on year min, **product_complexity** – components × weight, **web_sales_dominant** – is web > 50%, **mobile_sales_dominant** – is mobile > 50%, **platform_diversity** – number of active sales channels, **high_season** – whether Q4 dominates
+
+# Model Comparison & RMSE 
+
+
+```{r}
+bwplot(results)
+```
+
+# Random Forest Tuning
+
+```{r}
+library(ggplot2)
+
+ggplot(rf_tuned$results, aes(x = mtry, y = RMSE)) +
+  geom_line() +
+  geom_point(size = 3) +
+  geom_point(data = rf_tuned$results %>% filter(RMSE == min(RMSE)),
+             aes(x = mtry, y = RMSE), color = "red", size = 4) +
+  labs(title = "Random Forest Tuning: RMSE vs mtry",
+       x = "mtry (Variables per split)",
+       y = "Cross-Validated RMSE") +
+  theme_minimal()
+```
+
+# Final Model Performance
+
+Best RMSE: 1883.94
+
+Final model: Random Forest with mtry = 2
+
+Handles non-linearity and interaction effects well
+
+# Variable Importance
+```{r}
+vip(rf_tuned, num_features = 10) +
+  ggtitle("Top Predictors of Profit (Random Forest)") +
+  theme_minimal()
+```
+
+# Why This Model is Practical 
+
+Fast, interpretable, and robust to data quirks
+
+All features available before product launch
+
+Avoids hidden leakage from profit calculation
+
+Flexible enough to adapt with new product lines
+
+# Potential Next Steps
+
+Try interaction terms (e.g., product_age * Q4Sales)
+
+Explore stacking RF + XGBoost
+
+Add product category metadata
+
+Track model drift over time

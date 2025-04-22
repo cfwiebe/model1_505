@@ -1,0 +1,33 @@
+```{r}
+engineer <- function(df) {
+  df %>%
+    mutate(
+      # Convert percentages
+      across(
+        c(starts_with("src_"), starts_with("pct_"),
+          January:December),
+        ~ as.numeric(str_remove(., "%")) / 100
+      ),
+      # Create base features
+      yearMin = as.numeric(na_if(yearMin, "?")),
+      product_age = 2023 - yearMin,
+      Q1Sales = January + February + March,
+      Q4Sales = October + November + December,
+      high_season = if_else(Q4Sales > 0.5, 1, 0),
+      is_variant = if_else(`Listing Type` == "variant", 1, 0),
+      product_complexity = `Number of Components` * `Unit Weight (pounds)`,
+      direct_sales_ratio = `pct_Direct Sales`,
+      stock_orders_pct = `pct_Orders for Stock`,
+      web_sales_dominant = if_else(src_www > 0.5, 1, 0),
+      mobile_sales_dominant = if_else((src_iphone + src_android + src_ipad) > 0.5, 1, 0),
+      platform_diversity = rowSums(across(starts_with("src_")) > 0.1)
+    ) %>%
+    select(
+      direct_sales_ratio, stock_orders_pct,
+      Q1Sales, Q4Sales, high_season,
+      is_variant, product_age, product_complexity,
+      web_sales_dominant, mobile_sales_dominant,
+      platform_diversity
+    )
+}
+```
